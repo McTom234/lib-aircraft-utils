@@ -8,6 +8,10 @@ with everything needed to build it on Linux or macOS. No build support
 for Windows currently, sorry. The Linux version produces the Windows
 version of the library through a MinGW cross-compile.
 
+## How to build
+
+`rm -rf libacfutils-redist && docker build --target redist --output type=local,dest=. .`
+
 ## LICENSE
 
 This library is licensed under the CDDL 1.0 license. This lets you

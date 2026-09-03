@@ -1,0 +1,333 @@
+name: Build libacfutils redist
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+
+  # Required for old bundled CMake projects with modern CMake 4.x.
+  CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+
+  DEPS_CACHE_VERSION: '1'
+
+jobs:
+  build:
+    name: Build ${{ matrix.mode }} redist
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        mode:
+          - static
+          - dll
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+
+          sudo apt-get install -y --no-install-recommends \
+              ca-certificates \
+              git \
+              build-essential \
+              gcc-multilib \
+              g++-multilib \
+              cmake \
+              pkg-config \
+              automake \
+              autoconf \
+              libtool \
+              patch \
+              unzip \
+              bzip2 \
+              xz-utils \
+              perl \
+              python3 \
+              qtbase5-dev \
+              qtchooser \
+              qt5-qmake \
+              qtbase5-dev-tools \
+              libx11-dev \
+              libxcursor-dev \
+              libgl1-mesa-dev \
+              libglu1-mesa-dev \
+              libpulse-dev \
+              libasound2-dev \
+              mingw-w64
+
+      - name: Determine cache platform
+        id: platform
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          . /etc/os-release
+
+          echo "id=${ID}-${VERSION_ID}" >> "$GITHUB_OUTPUT"
+
+          echo "OS:      ${PRETTY_NAME}"
+          echo "GCC:     $(gcc --version | head -n1)"
+          echo "MinGW:   $(x86_64-w64-mingw32-gcc --version | head -n1)"
+          echo "CMake:   $(cmake --version | head -n1)"
+          echo "qmake:"
+          qmake -v
+
+      - name: Restore dependency cache
+        id: deps-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            **/*-linux-64
+            **/*-win-64
+            **/linux-64
+            **/win-64
+
+          key: >-
+            libacfutils-deps-${{ env.DEPS_CACHE_VERSION }}-${{
+            steps.platform.outputs.id }}-${{ runner.arch }}-${{
+            matrix.mode }}-${{
+            hashFiles(
+              'build_deps',
+              'build_dep.common',
+              'XCompile.cmake',
+              '.gitmodules',
+              '**/build_*'
+            ) }}
+
+      - name: Build dependencies
+        shell: bash
+        env:
+          BUILD_MODE: ${{ matrix.mode }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$BUILD_MODE" == "dll" ]]; then
+              ./build_deps -d
+          else
+              ./build_deps
+          fi
+
+      - name: Save dependency cache
+        if: >-
+          github.ref_name == github.event.repository.default_branch &&
+          steps.deps-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            **/*-linux-64
+            **/*-win-64
+            **/linux-64
+            **/win-64
+
+          key: ${{ steps.deps-cache.outputs.cache-primary-key }}
+
+      - name: Build redist
+        shell: bash
+        env:
+          BUILD_MODE: ${{ matrix.mode }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$BUILD_MODE" == "dll" ]]; then
+              ./build_redist -d
+
+              test -d libacfutils-redist/include
+              test -d libacfutils-redist/lin64
+              test -d libacfutils-redist/win64
+
+              test -n "$(
+                  find libacfutils-redist/win64 \
+                      -type f \
+                      -name '*.dll' \
+                      -print \
+                      -quit
+              )"
+          else
+              ./build_redist
+
+              test -d libacfutils-redist/include
+              test -d libacfutils-redist/lin64
+              test -d libacfutils-redist/mingw64
+
+              test -f \
+                  libacfutils-redist/lin64/lib/libacfutils.a
+
+              test -f \
+                  libacfutils-redist/mingw64/lib/libacfutils.a
+          fi
+
+      - name: Upload static redist
+        if: matrix.mode == 'static'
+        uses: actions/upload-artifact@v7
+        with:
+          name: libacfutils-redist-static
+          path: libacfutils-redist/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 1
+
+      - name: Upload Windows DLL redist
+        if: matrix.mode == 'dll'
+        uses: actions/upload-artifact@v7
+        with:
+          name: libacfutils-redist-win64
+          path: libacfutils-redist/win64/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 1
+
+  publish:
+    name: Publish detached redist commit
+
+    needs:
+      - build
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout source tag
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check redist tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REDIST_TAG="redist-${GITHUB_REF_NAME}"
+
+          if git ls-remote \
+              --exit-code \
+              --tags \
+              origin \
+              "refs/tags/${REDIST_TAG}" \
+              >/dev/null 2>&1
+          then
+              echo "Tag ${REDIST_TAG} already exists."
+              exit 1
+          fi
+
+      - name: Remove existing redist
+        shell: bash
+        run: |
+          rm -rf libacfutils-redist
+
+      - name: Download static redist
+        uses: actions/download-artifact@v8
+        with:
+          name: libacfutils-redist-static
+          path: libacfutils-redist
+
+      - name: Download Windows DLL redist
+        uses: actions/download-artifact@v8
+        with:
+          name: libacfutils-redist-win64
+          path: libacfutils-redist/win64
+
+      - name: Verify combined redist
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -d libacfutils-redist/include
+          test -d libacfutils-redist/lin64
+          test -d libacfutils-redist/mingw64
+          test -d libacfutils-redist/win64
+
+          test -f \
+              libacfutils-redist/lin64/lib/libacfutils.a
+
+          test -f \
+              libacfutils-redist/mingw64/lib/libacfutils.a
+
+          test -n "$(
+              find libacfutils-redist/win64 \
+                  -type f \
+                  -name '*.dll' \
+                  -print \
+                  -quit
+          )"
+
+          echo
+          echo "Combined redistribution:"
+          find libacfutils-redist -maxdepth 3 -type f -print | sort
+
+      - name: Create detached redist commit
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOURCE_TAG="$GITHUB_REF_NAME"
+          REDIST_TAG="redist-${SOURCE_TAG}"
+
+          git config user.name "github-actions[bot]"
+          git config \
+              user.email \
+              "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout --detach "$GITHUB_SHA"
+
+          git add -f libacfutils-redist
+
+          git commit \
+              -m "Build redist for ${SOURCE_TAG}"
+
+          REDIST_COMMIT="$(git rev-parse HEAD)"
+
+          git tag \
+              -a "$REDIST_TAG" \
+              -m "libacfutils redistribution for ${SOURCE_TAG}" \
+              "$REDIST_COMMIT"
+
+          echo "commit=${REDIST_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "tag=${REDIST_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Push redist tag
+        shell: bash
+        env:
+          REDIST_TAG: ${{ steps.commit.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          git push origin "refs/tags/${REDIST_TAG}"
+
+      - name: Summary
+        shell: bash
+        env:
+          REDIST_TAG: ${{ steps.commit.outputs.tag }}
+          REDIST_COMMIT: ${{ steps.commit.outputs.commit }}
+        run: |
+          {
+              echo "## libacfutils redist"
+              echo
+              echo "- Source tag: \`${GITHUB_REF_NAME}\`"
+              echo "- Source commit: \`${GITHUB_SHA}\`"
+              echo "- Redist tag: \`${REDIST_TAG}\`"
+              echo "- Redist commit: \`${REDIST_COMMIT}\`"
+              echo
+              echo "Platforms:"
+              echo "- \`lin64\`"
+              echo "- \`mingw64\`"
+              echo "- \`win64\`"
+          } >> "$GITHUB_STEP_SUMMARY"
